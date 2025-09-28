@@ -2,6 +2,7 @@
 #include <NimBLEDevice.h>
 #include <vector>
 #include <stdint.h>
+#include <string> // needed for std::string
 
 // Nordic UART Service UUIDs (NUS)
 static const char *NUS_SVC = "6e400001-b5a3-f393-e0a9-e50e24dcca9e";
@@ -17,11 +18,12 @@ static NimBLECharacteristic *txChr = nullptr; // for notifications
 static const uint32_t SLOT_MS = 60 * 1000; // 60000 ms
 static uint32_t last_tick = 0;
 
-// ----- 12 generated codes (one 32-bit word per slot) -----
-static const uint32_t CODES[12] = {
+// ----- 12 codes (one 32-bit word per slot) — MUTABLE in RAM -----
+alignas(4) static uint32_t CODES[12] = {
     0xf952b74b, 0xd7627cff, 0x1c76ed95, 0xff3b5f16,
     0x1ba623ca, 0xc3f960d3, 0x3bb3dc02, 0x43ec57bd,
     0x165c3a72, 0xd611370d, 0xbc51cc84, 0xf4a4c80b};
+
 static size_t g_idx = 0;
 
 // ---------- tiny CRC8 (Dallas/Maxim poly 0x31) ----------
@@ -64,13 +66,13 @@ static void setScanRespChunk(uint8_t idx, uint32_t word_be)
 
   advScan = NimBLEAdvertisementData();
   advScan.setManufacturerData(m);
-  adv->setScanResponseData(advScan);
+  if (adv)
+    adv->setScanResponseData(advScan);
 
-  // pretty log
   Serial.printf("[ADV] SR idx=%u word=0x%08X crc8=0x%02X\n", idx, (unsigned)word_be, crc);
 }
 
-// --- in RxWriteCB: keep it (optional), but now treat incoming bytes as new codebook (multiple of 4)
+// --- in RxWriteCB: treat incoming bytes as new codebook (multiple of 4)
 class RxWriteCB : public NimBLECharacteristicCallbacks
 {
   void onWrite(NimBLECharacteristic *c, NimBLEConnInfo &) override
@@ -79,39 +81,40 @@ class RxWriteCB : public NimBLECharacteristicCallbacks
     if (v.empty())
       return;
 
-    // interpret as raw bytes; take up to 12 words (48 bytes)
+    // Take up to 12 little-endian 32-bit words (ignore trailing <4 bytes)
     size_t words = v.size() / 4;
     if (words > 12)
       words = 12;
 
-    if (words > 0)
-    {
-      for (size_t i = 0; i < words; ++i)
-      {
-        uint32_t w = ((uint8_t)v[4 * i + 0] << 0) |
-                     ((uint8_t)v[4 * i + 1] << 8) |
-                     ((uint8_t)v[4 * i + 2] << 16) |
-                     ((uint8_t)v[4 * i + 3] << 24);
-        // assume incoming is little-endian; store as-is then send big-endian
-        ((uint32_t *)CODES)[i] = w;
-      }
-      // zero any remaining
-      for (size_t i = words; i < 12; ++i)
-        ((uint32_t *)CODES)[i] = 0;
-      g_idx = 0;
-      last_tick = millis();
-      setScanRespChunk((uint8_t)g_idx, CODES[g_idx]);
+    if (words == 0)
+      return;
 
-      if (txChr)
-      {
-        char msg[64];
-        int n = snprintf(msg, sizeof(msg), "OK %u bytes (%u words)", (unsigned)v.size(), (unsigned)words);
-        txChr->setValue((uint8_t *)msg, (size_t)n);
-        txChr->notify();
-      }
-      Serial.printf("[NUS] RX wrote %u bytes; loaded %u words\n",
-                    (unsigned)v.size(), (unsigned)words);
+    // Parse safely without aliasing/unaligned access
+    for (size_t i = 0; i < words; ++i)
+    {
+      const uint8_t *p = (const uint8_t *)&v[4 * i];
+      uint32_t w = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+      CODES[i] = w;
     }
+    // Zero any remaining slots
+    for (size_t i = words; i < 12; ++i)
+      CODES[i] = 0;
+
+    // Reset rotation and publish the first chunk immediately
+    g_idx = 0;
+    last_tick = millis();
+    setScanRespChunk((uint8_t)g_idx, CODES[g_idx]);
+
+    if (txChr)
+    {
+      char msg[64];
+      int n = snprintf(msg, sizeof(msg), "OK %u bytes (%u words)",
+                       (unsigned)v.size(), (unsigned)words);
+      txChr->setValue((uint8_t *)msg, (size_t)n);
+      txChr->notify();
+    }
+    Serial.printf("[NUS] RX wrote %u bytes; loaded %u words\n",
+                  (unsigned)v.size(), (unsigned)words);
   }
 };
 
