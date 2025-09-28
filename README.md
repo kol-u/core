@@ -10,7 +10,7 @@ The goal of the system is to reduce the drone friendly fire rate.
 
 ## Communication protocol overview 
 
-![Screenshot 2025-09-27 at 21.19.44](https://drive.google.com/file/d/1vKl-StvEj0TqbJU4Uotxlsyg7DYwrh7m/view?usp=drive_link)
+![Screenshot 2025-09-27 at 21.19.44](./flow.png)
 
 The protocol is made of two main phases. 
 
